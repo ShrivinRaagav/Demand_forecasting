@@ -6,6 +6,7 @@ import shap
 import joblib
 from pathlib import Path
 import logging
+import matplotlib.pyplot as plt
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
@@ -113,11 +114,39 @@ def shap_explainability(model, X_train):
     joblib.dump(explainer, MODEL_DIR / "shap_explainer.pkl")
     logging.info("SHAP computation complete.")
 
+def plot_sample_forecast(results, store_id=1, item_id=1):
+    """Plot the predictions with uncertainty interval for a single store and item."""
+    logging.info(f"Plotting forecast for Store {store_id}, Item {item_id}...")
+    sample = results[(results['store'] == store_id) & (results['item'] == item_id)].copy()
+    sample['date'] = pd.to_datetime(sample['date'])
+    sample = sample.sort_values('date')
+    
+    plt.figure(figsize=(12, 6))
+    
+    # Plot Confidence Interval (80% band)
+    plt.fill_between(sample['date'], sample['forecast_lower_10'], sample['forecast_upper_90'], 
+                     color='green', alpha=0.2, label='80% Prediction Interval (Safety Stock Range)')
+    
+    # Plot Actual vs Median Forecast
+    plt.plot(sample['date'], sample['sales'], label='Actual Sales', color='blue', marker='o', markersize=4)
+    plt.plot(sample['date'], sample['forecast_median_50'], label='Median Forecast (Expected Demand)', color='red', linestyle='--')
+    
+    plt.title(f"Demand Forecast vs Actuals (Store {store_id}, Item {item_id})")
+    plt.xlabel("Date")
+    plt.ylabel("Sales")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.show()
+
 def main():
     X_train, y_train, X_test, y_test, features, test_df = load_data()
     models = train_quantile_models(X_train, y_train)
     evaluate_models(models, X_test, y_test)
-    generate_inventory_decisions(test_df, models, X_test)
+    results = generate_inventory_decisions(test_df, models, X_test)
+    
+    # Display the plot natively for demonstration
+    plot_sample_forecast(results)
     
     # Generate explainability for median model
     shap_explainability(models['q_50'], X_train)
