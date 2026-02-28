@@ -11,29 +11,42 @@ import matplotlib.pyplot as plt
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-PROCESSED_DATA_PATH = PROJECT_ROOT / "data" / "processed" / "train_features.csv"
+PROCESSED_DATA_PATH = PROJECT_ROOT / "data" / "processed" / "powergrid_features.csv"
 MODEL_DIR = PROJECT_ROOT / "models"
-PREDICTIONS_PATH = PROJECT_ROOT / "data" / "processed" / "predictions.csv"
+PREDICTIONS_PATH = PROJECT_ROOT / "data" / "processed" / "powergrid_predictions.csv"
 
 def load_data():
     logging.info(f"Loading features from {PROCESSED_DATA_PATH}...")
     df = pd.read_csv(PROCESSED_DATA_PATH)
-    # Use last 90 days as test set for time-series validation
+    
+    # Needs to be sorted chronologically for valid time series split
+    df['date'] = pd.to_datetime(df['date'])
     df = df.sort_values('date')
     
-    # Simple split
-    test_size = 90 * 50 * 10 # 90 days * 50 items * 10 stores
-    train_df = df.iloc[:-test_size]
-    test_df = df.iloc[-test_size:]
+    # We will reserve the final 12 weeks of data across all projects as our test set
+    test_weeks = 12
+    latest_date = df['date'].max()
+    split_date = latest_date - pd.DateOffset(weeks=test_weeks)
     
-    features = [c for c in df.columns if c not in ['date', 'sales']]
-    X_train, y_train = train_df[features], train_df['sales']
-    X_test, y_test = test_df[features], test_df['sales']
+    train_df = df[df['date'] <= split_date].copy()
+    test_df = df[df['date'] > split_date].copy()
+    
+    # Target is quantity demanded for next period
+    target = 'quantity_demanded'
+    
+    # Drop non-predictive features like date and text IDs
+    # LightGBM handles categories natively if dtype is 'category', but we specifically 
+    # frequency-encoded them in preprocessing, so we can drop the original text.
+    ignore_cols = ['date', 'project_id', 'location', 'tower_type', 'substation', 'material', target]
+    features = [c for c in df.columns if c not in ignore_cols]
+    
+    X_train, y_train = train_df[features], train_df[target]
+    X_test, y_test = test_df[features], test_df[target]
     
     return X_train, y_train, X_test, y_test, features, test_df
 
 def train_quantile_models(X_train, y_train):
-    """Train LightGBM models for 10th, 50th (median), and 90th percentiles."""
+    """Train LightGBM models for Procurement Uncertainty."""
     models = {}
     alphas = [0.10, 0.50, 0.90]
     
@@ -51,53 +64,63 @@ def train_quantile_models(X_train, y_train):
         
         # Save model
         MODEL_DIR.mkdir(parents=True, exist_ok=True)
-        joblib.dump(model, MODEL_DIR / f"lgbm_quantile_{int(alpha*100)}.pkl")
+        joblib.dump(model, MODEL_DIR / f"powergrid_lgbm_q{int(alpha*100)}.pkl")
         
     return models
 
 def evaluate_models(models, X_test, y_test):
-    """Evaluate point forecast (50th percentile) using standard metrics"""
     median_model = models['q_50']
     preds = median_model.predict(X_test)
     
     mae = mean_absolute_error(y_test, preds)
     rmse = np.sqrt(mean_squared_error(y_test, preds))
-    mape = mean_absolute_percentage_error(y_test, preds)
     
+    # Calculate MAPE safely (avoid div by zero on zero-demand weeks)
+    mask = y_test != 0
+    if mask.sum() > 0:
+        mape = mean_absolute_percentage_error(y_test[mask], preds[mask])
+    else:
+        mape = 0.0
+        
     logging.info(f"Evaluation Metrics (50th Percentile) - MAE: {mae:.2f}, RMSE: {rmse:.2f}, MAPE: {mape:.2f}")
     return preds
 
-def generate_inventory_decisions(test_df, models, X_test):
-    """Implement rule-based Inventory Decision Engine."""
-    logging.info("Generating predictions and inventory decisions...")
-    results = test_df[['date', 'store', 'item', 'sales']].copy()
+def generate_procurement_decisions(test_df, models, X_test):
+    """Implement rule-based Supply Chain Procurement Engine."""
+    logging.info("Generating procurement recommendations...")
+    results = test_df[['date', 'project_id', 'location', 'material', 'quantity_demanded', 'total_cost_inr', 'budget_allocated_inr']].copy()
     
-    # Predict percentiles
+    # Predict percentiles bounds
     results['forecast_lower_10'] = np.maximum(0, models['q_10'].predict(X_test))
     results['forecast_median_50'] = np.maximum(0, models['q_50'].predict(X_test))
     results['forecast_upper_90'] = np.maximum(0, models['q_90'].predict(X_test))
     
-    # Simulate current stock levels (randomly for demonstration, or assume naive previous day sales)
-    # We will simulate current stock as actual sales + some random noise to demonstrate the logic appropriately
+    # Simulate current warehousing inventory (for demonstration purposes)
     np.random.seed(42)
-    results['current_stock'] = results['sales'] + np.random.randint(-15, 15, size=len(results))
-    results['current_stock'] = np.maximum(results['current_stock'], 0) # ensure stock is not negative
+    # Assume we mostly have what was needed, plus/minus some buffer
+    current_inventory = results['quantity_demanded'] + np.random.randint(-15, 30, size=len(results))
+    results['current_inventory'] = np.maximum(current_inventory, 0)
     
     def decision_logic(row):
-        c = row['current_stock']
+        inv = row['current_inventory']
         f_mid = row['forecast_median_50']
         f_up = row['forecast_upper_90']
         
-        if c < f_mid:
-            return "Increase"
-        elif f_mid <= c <= f_up:
-            return "Maintain"
+        # Procurement Logic
+        if inv < f_mid:
+            return "Procure Immediately" # Critical Shortage Risk
+        elif f_mid <= inv <= f_up:
+            return "On Schedule"         # Perfect
         else:
-            return "Reduce"
+            return "Halt Procurement"    # Overstocked / Budget Waste
             
     results['action'] = results.apply(decision_logic, axis=1)
     
-    logging.info(f"Inventory Actions Distribution:\n{results['action'].value_counts()}")
+    # Calculate projected overrun
+    results['projected_procurement_cost'] = results['forecast_median_50'] * (results['total_cost_inr'] / np.maximum(results['quantity_demanded'], 1))
+    results['projected_overrun'] = np.maximum(0, results['projected_procurement_cost'] - results['budget_allocated_inr'])
+    
+    logging.info(f"Procurement Actions Distribution:\n{results['action'].value_counts()}")
     
     results.to_csv(PREDICTIONS_PATH, index=False)
     logging.info(f"Saved decisions to {PREDICTIONS_PATH}")
@@ -106,34 +129,35 @@ def generate_inventory_decisions(test_df, models, X_test):
 def shap_explainability(model, X_train):
     """Generate SHAP values for the median model to understand feature importance."""
     logging.info("Calculating SHAP Explainability (using a sample to save time)...")
-    sample = X_train.sample(1000, random_state=42)
+    sample = X_train.sample(min(1000, len(X_train)), random_state=42)
     explainer = shap.TreeExplainer(model)
     shap_values = explainer.shap_values(sample)
     
-    # Save the explainer for later use in UI
-    joblib.dump(explainer, MODEL_DIR / "shap_explainer.pkl")
+    joblib.dump(explainer, MODEL_DIR / "powergrid_shap_explainer.pkl")
     logging.info("SHAP computation complete.")
 
-def plot_sample_forecast(results, store_id=1, item_id=1):
-    """Plot the predictions with uncertainty interval for a single store and item."""
-    logging.info(f"Plotting forecast for Store {store_id}, Item {item_id}...")
-    sample = results[(results['store'] == store_id) & (results['item'] == item_id)].copy()
-    sample['date'] = pd.to_datetime(sample['date'])
+def plot_sample_forecast(results):
+    """Plot the predictions for a sample project and material."""
+    project_id = results['project_id'].iloc[0]
+    material = results['material'].iloc[0]
+    
+    logging.info(f"Plotting forecast for Project {project_id}, {material}...")
+    sample = results[(results['project_id'] == project_id) & (results['material'] == material)].copy()
     sample = sample.sort_values('date')
     
     plt.figure(figsize=(12, 6))
     
     # Plot Confidence Interval (80% band)
     plt.fill_between(sample['date'], sample['forecast_lower_10'], sample['forecast_upper_90'], 
-                     color='green', alpha=0.2, label='80% Prediction Interval (Safety Stock Range)')
+                     color='green', alpha=0.2, label='80% Prediction Interval (Safety Buffer)')
     
     # Plot Actual vs Median Forecast
-    plt.plot(sample['date'], sample['sales'], label='Actual Sales', color='blue', marker='o', markersize=4)
-    plt.plot(sample['date'], sample['forecast_median_50'], label='Median Forecast (Expected Demand)', color='red', linestyle='--')
+    plt.plot(sample['date'], sample['quantity_demanded'], label='Actual Material Drawdown', color='blue', marker='o', markersize=4)
+    plt.plot(sample['date'], sample['forecast_median_50'], label='Median Planned Forecast', color='red', linestyle='--')
     
-    plt.title(f"Demand Forecast vs Actuals (Store {store_id}, Item {item_id})")
-    plt.xlabel("Date")
-    plt.ylabel("Sales")
+    plt.title(f"Material Demand Forecast vs Actuals ({project_id} - {material})")
+    plt.xlabel("Date (Weekly Planning Cycle)")
+    plt.ylabel("Quantity Demanded")
     plt.legend()
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -143,12 +167,12 @@ def main():
     X_train, y_train, X_test, y_test, features, test_df = load_data()
     models = train_quantile_models(X_train, y_train)
     evaluate_models(models, X_test, y_test)
-    results = generate_inventory_decisions(test_df, models, X_test)
+    results = generate_procurement_decisions(test_df, models, X_test)
     
-    # Display the plot natively for demonstration
+    # Interactive plotting
     plot_sample_forecast(results)
     
-    # Generate explainability for median model
+    # Explainability
     shap_explainability(models['q_50'], X_train)
 
 if __name__ == "__main__":
