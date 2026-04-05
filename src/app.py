@@ -14,10 +14,15 @@ PROCESSED_DATA_PATH = PROJECT_ROOT / "data" / "processed" / "powergrid_features.
 
 st.set_page_config(page_title="PowerGrid Procurement AI", layout="wide", page_icon="⚡")
 
+
 # Header Section
 colA, colB = st.columns([1, 4])
 with colA:
-    st.image("https://upload.wikimedia.org/wikipedia/en/thumb/5/52/Power_Grid_Corporation_of_India_Logo.svg/1200px-Power_Grid_Corporation_of_India_Logo.svg.png", width=120)
+    logo_path = PROJECT_ROOT / "assets" / "powergrid_logo.png"
+    if logo_path.exists():
+        st.image(str(logo_path), width=120)
+    else:
+        st.markdown("<h1>⚡</h1>", unsafe_allow_html=True)
 with colB:
     st.title("Material Demand Forecasting & Procurement Optimization")
     st.markdown("**(Ministry of Power - ID 25193)** | *AI-Driven Supply Chain Planning for National Infrastructure Projects*")
@@ -79,14 +84,14 @@ if df is not None:
     fig = go.Figure()
     
     # Add actual material usage
-    fig.add_trace(go.Scatter(x=filtered_df['date'], y=filtered_df['quantity_demanded'], name='Actual Drawdown', mode='lines+markers'))
+    fig.add_trace(go.Scatter(x=filtered_df['date'], y=filtered_df['quantity_demanded'], name='Actual Drawdown', mode='lines+markers', marker=dict(color='#38bdf8', size=6), line=dict(color='#38bdf8', width=2)))
     
     # Add uncertainty band (10th to 90th percentile)
     fig.add_trace(go.Scatter(
         x=filtered_df['date'].tolist() + filtered_df['date'].tolist()[::-1],
         y=filtered_df['forecast_upper_90'].tolist() + filtered_df['forecast_lower_10'].tolist()[::-1],
         fill='toself',
-        fillcolor='rgba(0,100,80,0.2)',
+        fillcolor='rgba(56, 189, 248, 0.1)',
         line=dict(color='rgba(255,255,255,0)'),
         hoverinfo="skip",
         showlegend=True,
@@ -94,103 +99,115 @@ if df is not None:
     ))
     
     # Add median forecast
-    fig.add_trace(go.Scatter(x=filtered_df['date'], y=filtered_df['forecast_median_50'], name='Median Forecast', line=dict(color='red', dash='dash')))
+    fig.add_trace(go.Scatter(x=filtered_df['date'], y=filtered_df['forecast_median_50'], name='Median Forecast', line=dict(color='#fbbf24', dash='dash')))
     
-    fig.update_layout(height=450, xaxis_title="Timeline (Weekly Planning)", yaxis_title="Quantity Demanded")
+    fig.update_layout(
+        height=450, 
+        xaxis_title="", 
+        yaxis_title="Quantity Demanded",
+        template="plotly_dark",
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        margin=dict(l=0, r=0, t=30, b=0),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1)
+    )
+    
+    # Minimalist Gridlines
+    fig.update_xaxes(showgrid=False, zeroline=False)
+    fig.update_yaxes(showgrid=True, gridcolor='#27272a', zeroline=False)
+    
     st.plotly_chart(fig, use_container_width=True)
     
-    st.markdown("""
-    ### System Architecture Insights (IEEE Standards)
-    - **Models:** LightGBM Quantile Regression models spatial constraints (e.g. North vs South terrain), taxes, and budget vectors.
-    - **Risk Handling:** The green band represents the safety range. As long as inventory remains within this band, project delays are avoided while holding costs are restricted.
-    - **XAI:** SHAP features run organically during training to highlight whether budget multipliers vs location heavily weighted a material spike.
-    """)
-    
-    st.dataframe(filtered_df[['date', 'quantity_demanded', 'forecast_lower_10', 'forecast_median_50', 'forecast_upper_90', 'current_inventory', 'budget_allocated_inr', 'total_cost_inr', 'action']].tail(10))
+    with st.expander("📊 View Raw Predictions Data"):
+        st.dataframe(filtered_df[['date', 'quantity_demanded', 'forecast_lower_10', 'forecast_median_50', 'forecast_upper_90', 'current_inventory', 'budget_allocated_inr', 'total_cost_inr', 'action']].tail(10))
 
     # --- SHAP Explainability Section ---
     st.markdown("---")
-    st.subheader(f"🧠 AI Explainability (SHAP) for latest {selected_material} demand")
-    
-    if EXPLAINER_PATH.exists() and PROCESSED_DATA_PATH.exists():
-        try:
-            # Load raw features to get column names and a sample line
-            raw_features_df = pd.read_csv(PROCESSED_DATA_PATH)
-            
-            # Find the exact same row in the raw features dataset matching the last prediction
-            last_date_str = latest_row['date'].strftime('%Y-%m-%d')
-            feature_row = raw_features_df[(raw_features_df['project_id'] == selected_project) & 
-                                          (raw_features_df['material'] == selected_material) & 
-                                          (raw_features_df['date'] == last_date_str)]
-            
-            if not feature_row.empty:
-                # Drop non-feature columns exactly as model_training.py did
-                ignore_cols = ['date', 'project_id', 'location', 'tower_type', 'substation', 'material', 'quantity_demanded']
-                features_only = feature_row.drop(columns=[col for col in ignore_cols if col in feature_row.columns])
+    with st.expander("🧠 AI Explainability (SHAP): Why did the AI make this decision?", expanded=True):
+        st.subheader(f"Analyzing {selected_material} demand drivers")
+        
+        if EXPLAINER_PATH.exists() and PROCESSED_DATA_PATH.exists():
+            try:
+                # Load raw features to get column names and a sample line
+                raw_features_df = pd.read_csv(PROCESSED_DATA_PATH)
                 
-                # Load Explainer
-                explainer = joblib.load(EXPLAINER_PATH)
-                shap_values = explainer.shap_values(features_only)
+                # Find the exact same row in the raw features dataset matching the last prediction
+                last_date_str = latest_row['date'].strftime('%Y-%m-%d')
+                feature_row = raw_features_df[(raw_features_df['project_id'] == selected_project) & 
+                                              (raw_features_df['material'] == selected_material) & 
+                                              (raw_features_df['date'] == last_date_str)]
                 
-                # Plot
-                fig_shap, ax = plt.subplots(figsize=(10, 5))
-                shap.summary_plot(shap_values, features_only, plot_type="bar", show=False, max_display=7)
-                plt.title("Top Factors Influencing This Specific Procurement Rule")
-                
-                col_shap1, col_shap2 = st.columns([2, 1])
-                with col_shap1:
-                    st.pyplot(fig_shap)
-                with col_shap2:
-                    st.info("**How to read this:**\nThe longer the bar, the more that specific factor (like the region, or budget variance) pushed the AI to increase or decrease the predicted material drawdown for this week.")
+                if not feature_row.empty:
+                    # Drop non-feature columns exactly as model_training.py did
+                    ignore_cols = ['date', 'project_id', 'location', 'tower_type', 'substation', 'material', 'quantity_demanded']
+                    features_only = feature_row.drop(columns=[col for col in ignore_cols if col in feature_row.columns])
                     
-                    # Generate Natural Language Explanation
-                    st.write("### AI Conclusion Explanation")
+                    # Load Explainer
+                    explainer = joblib.load(EXPLAINER_PATH)
+                    shap_values = explainer.shap_values(features_only)
                     
-                    # Map feature names to readable business terms
-                    feature_map = {
-                        'quantity_lag_1w': 'Drawdown last week',
-                        'quantity_roll_mean_12w': '12-week consumption trend',
-                        'budget_utilization_ratio': 'Budget Burn Rate',
-                        'is_monsoon': 'Monsoon Season Status',
-                        'tax_rate': 'Prevailing Tax Rate',
-                        'location_freq_encoded': 'Geographic Region Profile',
-                        'substation_freq_encoded': 'Substation Size/Type',
-                        'tower_type_freq_encoded': 'Tower Structure Type'
-                    }
+                    # Plot
+                    plt.style.use('dark_background')
+                    fig_shap, ax = plt.subplots(figsize=(10, 5))
+                    fig_shap.patch.set_alpha(0.0)
+                    ax.patch.set_alpha(0.0)
+                    shap.summary_plot(shap_values, features_only, plot_type="bar", show=False, max_display=7, color="#38bdf8")
+                    plt.title("Top Factors Influencing This Specific Procurement Rule", color="#fafafa")
                     
-                    # Get the individual SHAP values for this specific row
-                    row_shap_values = shap_values[0]
-                    feature_names = features_only.columns
-                    
-                    # Sort features by absolute impact
-                    impacts = pd.DataFrame({
-                        'Feature': feature_names,
-                        'Impact': row_shap_values,
-                        'Absolute_Impact': np.abs(row_shap_values)
-                    }).sort_values('Absolute_Impact', ascending=False)
-                    
-                    top_positive = impacts[impacts['Impact'] > 0].head(1)
-                    top_negative = impacts[impacts['Impact'] < 0].head(1)
-                    
-                    explanation = f"The AI recommended **{action}** for taking inventory to {forecast_mid:,.0f} units for this specific {selected_project} site.\n\n"
-                    
-                    if not top_positive.empty:
-                        feat_name = feature_map.get(top_positive.iloc[0]['Feature'], top_positive.iloc[0]['Feature'])
-                        explanation += f"🔹 **Why Demand is Driven Up**: The primary driver forcing the quantity *higher* right now is the **{feat_name}**.\n\n"
-                    
-                    if not top_negative.empty:
-                        feat_name = feature_map.get(top_negative.iloc[0]['Feature'], top_negative.iloc[0]['Feature'])
-                        explanation += f"🔻 **Why Demand is Suppressed**: Conversely, the AI prevented an even higher prediction because the **{feat_name}** is actively suppressing material drawdown."
+                    col_shap1, col_shap2 = st.columns([2, 1])
+                    with col_shap1:
+                        st.pyplot(fig_shap)
+                    with col_shap2:
+                        st.info("**How to read this:**\nThe longer the bar, the more that specific factor (like the region, or budget variance) pushed the AI to increase or decrease the predicted material drawdown for this week.")
                         
-                    st.success(explanation)
+                        # Generate Natural Language Explanation
+                        st.write("### AI Conclusion Explanation")
+                        
+                        # Map feature names to readable business terms
+                        feature_map = {
+                            'quantity_lag_1w': 'Drawdown last week',
+                            'quantity_roll_mean_12w': '12-week consumption trend',
+                            'budget_utilization_ratio': 'Budget Burn Rate',
+                            'is_monsoon': 'Monsoon Season Status',
+                            'tax_rate': 'Prevailing Tax Rate',
+                            'location_freq_encoded': 'Geographic Region Profile',
+                            'substation_freq_encoded': 'Substation Size/Type',
+                            'tower_type_freq_encoded': 'Tower Structure Type'
+                        }
+                        
+                        # Get the individual SHAP values for this specific row
+                        row_shap_values = shap_values[0]
+                        feature_names = features_only.columns
+                        
+                        # Sort features by absolute impact
+                        impacts = pd.DataFrame({
+                            'Feature': feature_names,
+                            'Impact': row_shap_values,
+                            'Absolute_Impact': np.abs(row_shap_values)
+                        }).sort_values('Absolute_Impact', ascending=False)
+                        
+                        top_positive = impacts[impacts['Impact'] > 0].head(1)
+                        top_negative = impacts[impacts['Impact'] < 0].head(1)
+                        
+                        explanation = f"The AI recommended **{action}** for taking inventory to {forecast_mid:,.0f} units for this specific {selected_project} site.\n\n"
+                        
+                        if not top_positive.empty:
+                            feat_name = feature_map.get(top_positive.iloc[0]['Feature'], top_positive.iloc[0]['Feature'])
+                            explanation += f"🔹 **Why Demand is Driven Up**: The primary driver forcing the quantity *higher* right now is the **{feat_name}**.\n\n"
+                        
+                        if not top_negative.empty:
+                            feat_name = feature_map.get(top_negative.iloc[0]['Feature'], top_negative.iloc[0]['Feature'])
+                            explanation += f"🔻 **Why Demand is Suppressed**: Conversely, the AI prevented an even higher prediction because the **{feat_name}** is actively suppressing material drawdown."
+                            
+                        st.success(explanation)
+                        
+                else:
+                    st.warning("Could not align the temporal feature row for SHAP calculation.")
                     
-            else:
-                st.warning("Could not align the temporal feature row for SHAP calculation.")
-                
-        except Exception as e:
-            st.warning(f"SHAP Explainer Error: {e}")
-    else:
-        st.info("SHAP models not found. Run model training completely to generate explainer files.")
+            except Exception as e:
+                st.warning(f"SHAP Explainer Error: {e}")
+        else:
+            st.info("SHAP models not found. Run model training completely to generate explainer files.")
 
 else:
     st.warning("Prediction data not found. Please run the training pipeline first.")
