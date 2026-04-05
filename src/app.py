@@ -25,7 +25,6 @@ with colA:
         st.markdown("<h1>⚡</h1>", unsafe_allow_html=True)
 with colB:
     st.title("Material Demand Forecasting & Procurement Optimization")
-    st.markdown("**(Ministry of Power - ID 25193)** | *AI-Driven Supply Chain Planning for National Infrastructure Projects*")
 
 # Load predictions
 @st.cache_data
